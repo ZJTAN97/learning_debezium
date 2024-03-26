@@ -1,0 +1,88 @@
+version: '3.7'
+
+networks:
+  cdc-network:
+    name: cdc-network
+    driver: bridge
+    external: false
+
+services:
+  cdc-postgres:
+    image: debezium/postgres:14-alpine
+    container_name: cdc-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=root
+      - POSTGRES_PASSWORD=root
+      - POSTGRES_DB=core
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+    volumes:
+      - 'cdc-postgres-data:/var/lib/postgresql/data'
+    networks:
+      - cdc-network
+  
+  cdc-kafka:
+    image: bitnami/kafka:3.4.1
+    container_name: cdc-kafka
+    hostname: cdc-kafka
+    restart: always
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_KRAFT_CLUSTER_ID: q0k00yjQRaqWmAAAZv955w # base64 UUID
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_LISTENERS: INTERNAL://cdc-kafka:29092,CONTROLLER://cdc-kafka:29093,EXTERNAL://0.0.0.0:9092,PLAINTEXT://127.0.0.1:9092
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://cdc-kafka:29092,PLAINTEXT://cdc-kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,LISTENER_LOCAL:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@cdc-kafka:29093
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    networks:
+      - cdc-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    restart: always
+    environment:
+      DYNAMIC_CONFIG_ENABLED: 'true'
+      KAFKA_CLUSTERS_0_NAME: q0k00yjQRaqWmAAAZv955w
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: cdc-kafka:9092
+    depends_on:
+      - cdc-kafka
+    networks:
+        - cdc-network
+
+  cdc-debezium-connect:
+    image: debezium/connect:2.5
+    container_name: cdc-debezium-connect
+    hostname: cdc-debezium-connect
+    restart: always
+    ports:
+        - '8083:8083'
+    environment:
+        BOOTSTRAP_SERVERS: cdc-kafka:29092
+        GROUP_ID: 1
+        CONFIG_STORAGE_TOPIC: my_connect_configs
+        OFFSET_STORAGE_TOPIC: my_connect_offsets
+        STATUS_STORAGE_TOPIC: my_connect_statuses
+        ENABLE_DEBEZIUM_SCRIPTING: 'true'
+    links:
+        - cdc-kafka
+        - cdc-postgres
+    networks:
+        - cdc-network
+    
+
+
+volumes:
+   cdc-postgres-data:
+       name: cdc-postgres-data
+       driver: local
