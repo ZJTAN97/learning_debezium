@@ -1,88 +1,101 @@
-version: '3.7'
-
-networks:
-  cdc-network:
-    name: cdc-network
-    driver: bridge
-    external: false
-
+version: '3.8'
 services:
-  cdc-postgres:
-    image: debezium/postgres:14-alpine
-    container_name: cdc-postgres
-    ports:
-      - "5432:5432"
+  database:
+    image: postgres:14.1-alpine
     environment:
-      - POSTGRES_USER=root
-      - POSTGRES_PASSWORD=root
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=core
-    command:
-      - "postgres"
-      - "-c"
-      - "wal_level=logical"
-    volumes:
-      - 'cdc-postgres-data:/var/lib/postgresql/data'
-    networks:
-      - cdc-network
-  
-  cdc-kafka:
-    image: bitnami/kafka:3.4.1
-    container_name: cdc-kafka
-    hostname: cdc-kafka
-    restart: always
     ports:
-      - "9092:9092"
+      - '5432:5432'
+    command: [ "postgres", "-c", "wal_level=logical" ]
+  zookeeper:
+    image: zookeeper:3.9.0
+    ports:
+      - 2181:2181
+      - 2888:2888
+      - 3888:3888
+  kafka:
+    image: docker.io/bitnami/kafka:3.4
+    ports:
+      - 9092:9092
+      - 9093:9093
     environment:
-      KAFKA_CFG_NODE_ID: 1
-      KAFKA_KRAFT_CLUSTER_ID: q0k00yjQRaqWmAAAZv955w # base64 UUID
-      KAFKA_CFG_PROCESS_ROLES: controller,broker
-      KAFKA_CFG_LISTENERS: INTERNAL://cdc-kafka:29092,CONTROLLER://cdc-kafka:29093,EXTERNAL://0.0.0.0:9092,PLAINTEXT://127.0.0.1:9092
-      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://cdc-kafka:29092,PLAINTEXT://cdc-kafka:9092
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,LISTENER_LOCAL:PLAINTEXT
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@cdc-kafka:29093
-      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-    networks:
-      - cdc-network
-
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_ADVERTISED_LISTENERS=INTERNAL://kafka:9092,EXTERNAL://127.0.0.1:9093
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL
+      - KAFKA_LISTENERS=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
+    depends_on:
+      - zookeeper
+  connect:
+    image: debezium/connect:2.4.0.Final
+    ports:
+      - 8083:8083
+      - 8778:8778
+    links:
+      - kafka
+      - database
+    environment:
+      - BOOTSTRAP_SERVERS=kafka:9092
+      - GROUP_ID=debezium-events
+      - CONFIG_STORAGE_TOPIC=debezium_configs
+      - OFFSET_STORAGE_TOPIC=debezium_offsets
+      - STATUS_STORAGE_TOPIC=debezium_statuses
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
-    container_name: kafka-ui
-    ports:
-      - "8080:8080"
-    restart: always
     environment:
-      DYNAMIC_CONFIG_ENABLED: 'true'
-      KAFKA_CLUSTERS_0_NAME: q0k00yjQRaqWmAAAZv955w
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: cdc-kafka:9092
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+      - KAFKA_CLUSTERS_0_SCHEMA_REGISTRY=http://localhost:8081
+      - SPRING_PROFILES_ACTIVE=prod
+    ports:
+      - "9000:8080"
     depends_on:
-      - cdc-kafka
-    networks:
-        - cdc-network
-
-  cdc-debezium-connect:
-    image: debezium/connect:2.5
-    container_name: cdc-debezium-connect
-    hostname: cdc-debezium-connect
-    restart: always
-    ports:
-        - '8083:8083'
+      - kafka
+  debezium-ui:
+    image: debezium/debezium-ui:2.4
+    platform: linux/amd64
     environment:
-        BOOTSTRAP_SERVERS: cdc-kafka:29092
-        GROUP_ID: 1
-        CONFIG_STORAGE_TOPIC: my_connect_configs
-        OFFSET_STORAGE_TOPIC: my_connect_offsets
-        STATUS_STORAGE_TOPIC: my_connect_statuses
-        ENABLE_DEBEZIUM_SCRIPTING: 'true'
+      - KAFKA_CONNECT_URIS=http://connect:8083  # Pointing to Kafka Connect service
+    ports:
+      - 9091:8080
+    depends_on:
+      - connect
+  setup-debezium-connector:
+    image: curlimages/curl
+    depends_on:
+      - connect
     links:
-        - cdc-kafka
-        - cdc-postgres
-    networks:
-        - cdc-network
-    
-
-
-volumes:
-   cdc-postgres-data:
-       name: cdc-postgres-data
-       driver: local
+      - connect
+    environment:
+      DEBEZIUM_CONFIG: |
+        {
+          "name": "postgresql-connector",
+          "config": {
+            "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+            "connector.displayName": "PostgreSQL",
+            "topic.prefix": "pg-changes",
+            "database.user": "postgres",
+            "database.dbname": "core",
+            "table.exclude.list": "audit",
+            "database.hostname": "database",
+            "database.password": "postgres",
+            "name": "postgresql-connector",
+            "connector.id": "postgres",
+            "plugin.name": "pgoutput"
+          } 
+        }
+    command: >
+      sh -c "
+        sleep 10;
+        echo Waiting for Kafka Connect to start listening on connect:8083...;
+        while ! nc -z connect 8083;
+        do
+          sleep 1;
+        done;
+        echo Kafka Connect is up!;
+        echo $$DEBEZIUM_CONFIG > /tmp/debezium-connector-config.json
+        curl -X POST -H \"Content-Type: application/json\" --data @/tmp/debezium-connector-config.json http://connect:8083/connectors;
+      "

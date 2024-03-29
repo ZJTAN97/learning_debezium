@@ -1,0 +1,19 @@
+spring:
+  main:
+    web-application-type: none
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:5432/core
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+  kafka:
+    consumer:
+      bootstrap-servers: localhost:9093
+      group-id: core
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.value.default.type: com.learning.debezium.demo.domain.DebeziumEventDto
+        spring.json.type.mapping: "data:com.learning.debezium.demo.domain.DebeziumEventDto"
+        spring.json.trusted.packages: "*"

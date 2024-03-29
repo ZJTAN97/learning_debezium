@@ -1,5 +1,7 @@
 # learning_debezium
 
+This repository contains a simple demo of how to get debezium set up and running with Kafka.
+
 The below curl command essentially sends a request to the Debezium Connect to create a connector that captures changes from a PostgreSQL database and publishes them to Kafka topics.
 
 ```
